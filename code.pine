@@ -1,0 +1,131 @@
+//@version=6
+strategy("Hybrid EMA+RSI+MACD Strategy", overlay=true, max_labels_count=500)
+
+//────────────────────────────────────────────────────────────
+// USER INPUTS
+//────────────────────────────────────────────────────────────
+fastEmaLen = input.int(9,  "Fast EMA", minval=1)
+slowEmaLen = input.int(21, "Slow EMA", minval=1)
+
+rsiLen    = input.int(14, "RSI Length", minval=1)
+rsiThresh = input.int(50, "RSI Threshold", minval=1, maxval=100)
+
+macdFast   = input.int(12, "MACD Fast")
+macdSlow   = input.int(26, "MACD Slow")
+macdSignal = input.int(9,  "MACD Signal")
+
+useAtr     = input.bool(true, "Use ATR Stop/TP")
+atrLen     = input.int(14, "ATR Length")
+atrSLMult  = input.float(1.5, "ATR Stop Mult", step=0.1)
+atrTPMult  = input.float(3.0, "ATR TP Mult", step=0.1)
+
+qtyMode   = input.string("Percent of equity", "Position Sizing", options=["Percent of equity", "Fixed contracts"])
+qtyPct    = input.float(2.0, "Size % Equity", step=0.1)
+qtyFixed  = input.int(1, "Fixed Qty", minval=1)
+
+allowLong  = input.bool(true, "Allow Long")
+allowShort = input.bool(true, "Allow Short")
+
+showLabels = input.bool(true, "Show TP/SL Labels")
+showPlots  = input.bool(true, "Show Plot Signals")
+
+useFilter  = input.bool(false, "Require Close Beyond EMAs")
+
+//────────────────────────────────────────────────────────────
+// INDICATOR CALCULATIONS
+//────────────────────────────────────────────────────────────
+emaFast = ta.ema(close, fastEmaLen)
+emaSlow = ta.ema(close, slowEmaLen)
+
+rsiVal = ta.rsi(close, rsiLen)
+
+[macdLine, macdSignalLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+atr = ta.atr(atrLen)
+
+//────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+//────────────────────────────────────────────────────────────
+longTrend  = emaFast > emaSlow
+shortTrend = emaFast < emaSlow
+
+longMomentum  = rsiVal > rsiThresh and macdHist > 0
+shortMomentum = rsiVal < rsiThresh and macdHist < 0
+
+longCondition  = allowLong  and longTrend  and longMomentum
+shortCondition = allowShort and shortTrend and shortMomentum
+
+// Price filter (optional)
+if useFilter
+    longCondition  := longCondition  and close > emaFast and close > emaSlow
+    shortCondition := shortCondition and close < emaFast and close < emaSlow
+
+//────────────────────────────────────────────────────────────
+// POSITION SIZING (Optimized)
+//────────────────────────────────────────────────────────────
+getQty() =>
+    qtyMode == "Percent of equity" ?
+        math.max(math.floor(strategy.equity * (qtyPct / 100) / close), 1) :
+        qtyFixed
+
+qty = getQty()
+
+//────────────────────────────────────────────────────────────
+// STOP LOSS / TAKE PROFIT CALCULATIONS (Shared)
+//────────────────────────────────────────────────────────────
+calcStops(isLong, price) =>
+    stop_ = isLong ? price - atr * atrSLMult : price + atr * atrSLMult
+    tp_   = isLong ? price + atr * atrTPMult : price - atr * atrTPMult
+    [stop_, tp_]
+
+//────────────────────────────────────────────────────────────
+// EXECUTION BLOCK
+//────────────────────────────────────────────────────────────
+if longCondition
+    strategy.entry("Long", strategy.long, qty)
+    if useAtr
+        [sl, tp] = calcStops(true, close)
+        strategy.exit("Exit Long", from_entry="Long", stop=sl, limit=tp)
+    alert("LONG Signal: " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar)
+
+if shortCondition
+    strategy.entry("Short", strategy.short, qty)
+    if useAtr
+        [sl, tp] = calcStops(false, close)
+        strategy.exit("Exit Short", from_entry="Short", stop=sl, limit=tp)
+    alert("SHORT Signal: " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar)
+
+//────────────────────────────────────────────────────────────
+// PLOTTING
+//────────────────────────────────────────────────────────────
+plot(showPlots ? emaFast : na, "EMA Fast", color=color.yellow, linewidth=2)
+plot(showPlots ? emaSlow : na, "EMA Slow", color=color.orange, linewidth=2)
+
+plotshape(showPlots and longCondition,  "Long Signal",  shape.triangleup,   location.belowbar, size=size.small, color=color.green)
+plotshape(showPlots and shortCondition, "Short Signal", shape.triangledown, location.abovebar, size=size.small, color=color.red)
+
+// Hidden ATR bands for debugging
+plot(showPlots and useAtr ? close + atr * atrSLMult : na, "ATR Upper", display=display.none)
+plot(showPlots and useAtr ? close - atr * atrSLMult : na, "ATR Lower", display=display.none)
+
+//────────────────────────────────────────────────────────────
+// STOP/TP LABELS (Optimized)
+//────────────────────────────────────────────────────────────
+var label stopLabel  = na
+var label tpLabel    = na
+
+if showLabels and useAtr
+    if strategy.position_size != 0
+        isLong = strategy.position_size > 0
+        [slPrice, tpPrice] = calcStops(isLong, close)
+
+        label.delete(stopLabel)
+        label.delete(tpLabel)
+
+        stopLabel := label.new(bar_index, slPrice, 
+            text="SL\n" + str.tostring(slPrice, format.mintick), 
+            yloc=yloc.price, style=isLong ? label.style_label_down : label.style_label_up)
+
+        tpLabel := label.new(bar_index, tpPrice, 
+            text="TP\n" + str.tostring(tpPrice, format.mintick), 
+            yloc=yloc.price, style=isLong ? label.style_label_up : label.style_label_down)
